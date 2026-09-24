@@ -1,0 +1,46 @@
+rules_version = '2';
+
+// TableHabit security rules.
+//
+// Anyone signed in with one of the TableHabit accounts can read the table
+// (names, weekly logs, lifetime totals). Nobody can write anyone else's data,
+// and a submitted day is a permanent record: it can be created once but never
+// edited or deleted from the client.
+//
+// Deploy with:  firebase deploy --only firestore:rules --project tablehabit
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // Lifetime totals + avatar identity, one document per account.
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.auth.uid == uid;
+      allow update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.lifetimePoints is int
+        && request.resource.data.lifetimePoints >= resource.data.lifetimePoints;
+      allow delete: if false;
+    }
+
+    // One immutable document per submitted day: {uid}_{YYYY-MM-DD}.
+    match /dailyLogs/{logId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.uid == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // Today's in-progress checklist, one document per account.
+    match /drafts/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow write: if signedIn() && request.auth.uid == uid;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

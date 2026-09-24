@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+/* TableHabit palette — colordrop.io/palette/33799 ("Blueprint for Productivity") */
+@theme {
+  --color-th-mist: #f3f4f7;
+  --color-th-haze: #d9e2ef;
+  --color-th-sky: #a1c6e7;
+  --color-th-danube: #69a0d8;
+  --color-th-mariner: #2f82c9;
+  --color-th-cerulean: #0076a8;
+  --color-th-orient: #005a8c;
+  --color-th-regal: #003d6b;
+  --color-th-prussian: #001f4d;
+  --color-th-midnight: #000e2d;
+
+  --font-sans: var(--font-poppins), ui-sans-serif, system-ui, sans-serif;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-th-mist);
+  color: var(--color-th-prussian);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Soft, palette-only backdrop used by the landing and login screens. */
+.th-backdrop {
+  background-image:
+    radial-gradient(60rem 60rem at 50% 0%, var(--color-th-haze) 0%, transparent 65%),
+    radial-gradient(40rem 40rem at 100% 100%, var(--color-th-sky) 0%, transparent 70%);
+}
