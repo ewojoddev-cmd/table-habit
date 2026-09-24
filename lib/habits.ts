@@ -216,21 +216,42 @@ export function formatWeekRange(now: Date = new Date()): string {
 
 /* ------------------------------------------------------------------ roster */
 
+/**
+ * Stable, email-free identity for a table member.
+ *
+ * `key` is the permanent join key: it is stored on profile and day-log
+ * documents (`memberKey`) and is what the weekly table and leaderboards join
+ * on. It never changes — unlike a name or a login address — so a member can
+ * change either without losing their history.
+ */
 export type Member = {
+  key: string;
   name: string;
-  email: string;
   /** Avatar fill — one solid colour per member (all-male table, no pinks). */
   color: string;
 };
 
-/** The five TableHabit accounts. The logins themselves live in Firebase Auth. */
+/**
+ * The five TableHabit accounts. The logins themselves live in Firebase Auth,
+ * and joining to these rows happens by `memberKey` — never by writing any
+ * login address into the source.
+ */
 export const ROSTER: readonly Member[] = [
-  { name: "Mohammed", email: "mohammed@tablehabit.com", color: "#2f82c9" },
-  { name: "Abdullah", email: "abdullah@tablehabit.com", color: "#0f766e" },
-  { name: "Ammar", email: "ammar@tablehabit.com", color: "#b45309" },
-  { name: "Yousef", email: "yousef@tablehabit.com", color: "#4f46e5" },
-  { name: "Omar", email: "omar@tablehabit.com", color: "#15803d" },
+  { key: "mohammed", name: "Mohammed", color: "#2f82c9" },
+  { key: "abdullah", name: "Abdullah", color: "#0f766e" },
+  { key: "ammar", name: "Ammar", color: "#b45309" },
+  { key: "yousef", name: "Yousef", color: "#4f46e5" },
+  { key: "omar", name: "Omar", color: "#15803d" },
 ];
+
+export function memberKeys(): readonly string[] {
+  return ROSTER.map((member) => member.key);
+}
+
+export function rosterMember(key: string | null | undefined): Member | null {
+  if (!key) return null;
+  return ROSTER.find((candidate) => candidate.key === key) ?? null;
+}
 
 /** Colours for accounts that are not on the roster (e.g. a test login). */
 const GUEST_COLORS = [
@@ -242,28 +263,49 @@ const GUEST_COLORS = [
   "#a16207",
 ];
 
-function hashEmail(email: string): number {
+function hashText(text: string): number {
   let hash = 5381;
-  for (let index = 0; index < email.length; index += 1) {
-    hash = (hash * 33) ^ email.charCodeAt(index);
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 33) ^ text.charCodeAt(index);
   }
   return Math.abs(hash);
 }
 
 export type MemberIdentity = Member & { isMember: boolean };
 
-/** Name + colour for any email, falling back gracefully for unknown accounts. */
-export function identifyMember(email?: string | null): MemberIdentity {
-  const normalized = (email ?? "").trim().toLowerCase();
-  const member = ROSTER.find((candidate) => candidate.email === normalized);
+export function memberKeyForLogin(
+  address: string | null | undefined,
+): string | null {
+  const local = (address ?? "").trim().toLowerCase().split("@")[0];
+  if (!local) return null;
+  // First-name logins (e.g. a "mohammed" login) resolve to that roster seat.
+  if (rosterMember(local)) return local;
+  const byName = ROSTER.find(
+    (candidate) => candidate.name.toLowerCase() === local,
+  );
+  return byName ? byName.key : null;
+}
+
+/**
+ * Name + colour for a signed-in account. Roster members are recognised by the
+ * `memberKey` already stored on their profile document — login addresses are
+ * never compared and never appear in the source. Unknown accounts get a stable
+ * guest colour derived from their own id.
+ */
+export function identifyMember(input: {
+  memberKey?: string | null;
+  name?: string | null;
+  fallbackId?: string | null;
+}): MemberIdentity {
+  const member = rosterMember(input.memberKey);
   if (member) return { ...member, isMember: true };
 
-  const local = normalized.split("@")[0] || "Member";
-  const name = local.charAt(0).toUpperCase() + local.slice(1);
+  const name = (input.name ?? "").trim() || "Member";
+  const seed = input.fallbackId ?? name;
   return {
+    key: `guest:${seed}`,
     name,
-    email: normalized,
-    color: GUEST_COLORS[hashEmail(normalized) % GUEST_COLORS.length],
+    color: GUEST_COLORS[hashText(seed) % GUEST_COLORS.length],
     isMember: false,
   };
 }

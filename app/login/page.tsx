@@ -100,7 +100,7 @@ function LoginForm() {
               value={email}
               onChange={(event) => setEmail(event.target.value)}
               className="mt-2 w-full rounded-xl border border-th-haze bg-th-mist px-4 py-3 text-sm text-th-prussian placeholder:text-th-orient/40 focus:border-th-mariner focus:bg-white focus:outline-none focus:ring-2 focus:ring-th-sky"
-              placeholder="you@example.com"
+              placeholder="Your login email"
             />
           </div>
 

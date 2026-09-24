@@ -12,8 +12,10 @@ import {
 
 /**
  * "Track Your Habits" — today's date, the six habit boxes, a live points
- * preview and the submit button. Ticks are mirrored to Firestore as a draft,
- * and the day is closed automatically at midnight if it is never submitted.
+ * preview and the save button. Ticks are mirrored to Firestore as a draft,
+ * and the day is closed automatically at midnight if it is never saved.
+ * Saving is a live update: the day stays editable and every save overwrites
+ * the same record until the day finishes.
  */
 export default function TrackYourHabitsPanel() {
   const {
@@ -22,13 +24,14 @@ export default function TrackYourHabitsPanel() {
     points,
     status,
     submitted,
+    dirty,
     notice,
     error,
     toggle,
     submit,
   } = useDailyHabits();
 
-  const locked = status === "submitted";
+  const saved = status === "saved";
   const busy = status === "loading";
   const pending = status === "submitting";
 
@@ -92,14 +95,14 @@ export default function TrackYourHabitsPanel() {
                 checked
                   ? "border-th-mariner bg-white"
                   : "border-th-haze bg-white/60 hover:border-th-sky"
-              } ${locked || busy ? "cursor-default opacity-80" : "cursor-pointer"}`}
+              } ${busy ? "cursor-default opacity-80" : "cursor-pointer"}`}
             >
               <input
                 id={`habit-${habit.id}`}
                 name={habit.id}
                 type="checkbox"
                 checked={checked}
-                disabled={locked || busy}
+                disabled={busy}
                 onChange={() => toggle(habit.id)}
                 className="mt-0.5 h-5 w-5 shrink-0 accent-th-mariner"
               />
@@ -128,9 +131,11 @@ export default function TrackYourHabitsPanel() {
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-th-haze pt-4">
         <p id="habit-status" className="text-sm text-th-orient/80">
           {status === "loading" ? "Loading today's checklist…" : null}
-          {pending ? "Submitting…" : null}
-          {locked && submitted
-            ? `Recorded ${submitted.points} pts for today${submitted.auto ? " (closed automatically)" : ""}.`
+          {pending ? "Saving…" : null}
+          {saved && submitted
+            ? dirty
+              ? `Saved ${submitted.points} pts — you have unsaved changes.`
+              : `Saved ${submitted.points} pts for today${submitted.auto ? " (closed automatically)" : ""}. You can keep updating until the day ends.`
             : null}
           {status === "ready"
             ? `Checked ${checkedCount(checks)} of ${HABITS.length} habits.`
@@ -141,17 +146,23 @@ export default function TrackYourHabitsPanel() {
           id="habit-submit"
           type="button"
           onClick={submit}
-          disabled={locked || busy || pending}
+          disabled={busy || pending}
           className="rounded-xl bg-th-mariner px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-th-cerulean focus:outline-none focus-visible:ring-2 focus-visible:ring-th-cerulean focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:bg-th-sky"
         >
-          {locked ? "Submitted" : pending ? "Submitting…" : "Submit today"}
+          {pending
+            ? "Saving…"
+            : saved
+              ? dirty
+                ? "Save changes"
+                : "Saved — update again"
+              : "Submit today"}
         </button>
       </div>
 
       <p className="text-xs text-th-orient/70">
-        Every day is recorded once: submit it yourself, or let midnight close
-        it with whatever is ticked. Points then feed the weekly table and the
-        leaderboards.
+        Saving updates today&apos;s record live: submit as often as you like
+        until the day ends — the latest save is what the weekly table and the
+        leaderboards show.
       </p>
     </div>
   );

@@ -156,13 +156,7 @@ export default function LeaderboardPanel() {
               row={row}
               points={row.lifetimePoints}
               unit="pts"
-              meta={`${row.daysSubmitted} ${
-                row.daysSubmitted === 1 ? "day" : "days"
-              } tracked · ${
-                row.daysSubmitted > 0
-                  ? (row.lifetimePoints / row.daysSubmitted).toFixed(1)
-                  : "0.0"
-              } pts/day average`}
+              meta="lifetime total · never resets"
             />
           ))}
         </ol>

@@ -83,7 +83,11 @@ export default function TrackTableHabitsPanel() {
                         ) : null}
                       </p>
                       <p className="truncate text-xs text-th-orient/70">
-                        {row.hasAccount ? row.email : "hasn't signed in yet"}
+                        {row.hasAccount ? (
+                          <span className="text-th-cerulean">active</span>
+                        ) : (
+                          "hasn't signed in yet"
+                        )}
                       </p>
                     </div>
                   </div>

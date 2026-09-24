@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
+import { DAY_SAVED_EVENT } from "@/components/dashboard/useDailyHabits";
 import {
   fetchLogsSince,
   fetchMembers,
@@ -22,7 +23,7 @@ import {
 export type GroupRow = {
   key: string;
   name: string;
-  email: string;
+  memberKey: string;
   color: string;
   /** Is this the signed-in user? */
   isYou: boolean;
@@ -34,7 +35,6 @@ export type GroupRow = {
   /** Points contributed by each habit this week. */
   weekHabitPoints: HabitCounts;
   lifetimePoints: number;
-  daysSubmitted: number;
   /** Lifetime count of days each habit was completed. */
   habitTotals: HabitCounts;
 };
@@ -50,11 +50,12 @@ export type GroupData = {
 };
 
 /**
- * The shared view of the table: the five roster accounts only — always visible,
- * even before they have any points or have ever signed in. Accounts that are
- * not on the roster (test logins, e.g.) are ignored here so the family table
- * stays exactly five names; their own numbers still show on "Track Your
- * Habits".
+ * The shared view of the table: the five roster seats only — always visible,
+ * even before they have any points or have ever signed in. Joins happen by
+ * `memberKey`: each seat looks up its profile and day logs under that key,
+ * so the latest save of the day is what the table shows. Accounts without a
+ * roster seat (test logins, e.g.) are ignored here so the family table stays
+ * exactly five names; their own numbers still show on "Track Your Habits".
  */
 export function useGroupData(): GroupData {
   const { user } = useAuth();
@@ -90,42 +91,65 @@ export function useGroupData(): GroupData {
     void load();
   }, [load, nonce]);
 
+  // Refresh the table live whenever a day is saved from "Track Your Habits".
+  useEffect(() => {
+    const refreshOnSave = () => setNonce((value) => value + 1);
+    window.addEventListener(DAY_SAVED_EVENT, refreshOnSave);
+    return () => window.removeEventListener(DAY_SAVED_EVENT, refreshOnSave);
+  }, []);
+
   const refresh = useCallback(() => setNonce((value) => value + 1), []);
 
   const rows = useMemo(() => {
-    const byEmail = new Map(
-      members.map((member) => [member.email.toLowerCase(), member]),
-    );
-    const currentEmail = user?.email?.toLowerCase() ?? null;
+    const byMemberKey = new Map<string, MemberStats>();
+    for (const member of members) {
+      if (member.memberKey) byMemberKey.set(member.memberKey, member);
+    }
+    const logsByMemberKey = new Map<string, DayLog[]>();
+    for (const log of logs) {
+      if (!log.memberKey) continue;
+      const bucket = logsByMemberKey.get(log.memberKey) ?? [];
+      bucket.push(log);
+      logsByMemberKey.set(log.memberKey, bucket);
+    }
+    const currentUid = user?.uid ?? null;
     const result: GroupRow[] = [];
 
+    // A seat resolves only through its roster key — profiles without a key
+    // (guest accounts or records waiting for the one-time backfill on their
+    // owner's next sign-in) never occupy a seat, so no outside account can
+    // borrow a roster row or push points into it.
     for (const member of ROSTER) {
-      const stats = byEmail.get(member.email.toLowerCase());
-      const uid = stats?.uid ?? null;
-      const memberLogs = uid ? logs.filter((log) => log.uid === uid) : [];
+      const resolved = byMemberKey.get(member.key) ?? null;
+      const memberLogs = logsByMemberKey.get(member.key) ?? [];
+      // Records written before the key-based join carry no key; a keyed
+      // profile still falls back to its own uid so no history disappears.
+      const legacyLogs =
+        resolved && memberLogs.length === 0
+          ? logs.filter((log) => log.uid === resolved.uid)
+          : [];
+      const effectiveLogs = memberLogs.length > 0 ? memberLogs : legacyLogs;
 
       const weekHabitPoints = emptyCounts();
       for (const habit of HABITS) {
-        weekHabitPoints[habit.id] = memberLogs.reduce(
+        weekHabitPoints[habit.id] = effectiveLogs.reduce(
           (total, log) => total + (log.checks[habit.id] ? habit.points : 0),
           0,
         );
       }
 
       result.push({
-        key: uid ?? member.email,
-        name: stats?.name ?? member.name,
-        email: member.email,
-        color: stats?.color ?? member.color,
-        isYou:
-          currentEmail !== null && currentEmail === member.email.toLowerCase(),
-        hasAccount: Boolean(stats),
-        weekPoints: memberLogs.reduce((total, log) => total + log.points, 0),
-        weekDays: memberLogs.length,
+        key: resolved?.uid ?? member.key,
+        name: resolved?.name ?? member.name,
+        memberKey: member.key,
+        color: resolved?.color ?? member.color,
+        isYou: currentUid !== null && resolved?.uid === currentUid,
+        hasAccount: Boolean(resolved),
+        weekPoints: effectiveLogs.reduce((total, log) => total + log.points, 0),
+        weekDays: effectiveLogs.length,
         weekHabitPoints,
-        lifetimePoints: stats?.lifetimePoints ?? 0,
-        daysSubmitted: stats?.daysSubmitted ?? 0,
-        habitTotals: stats?.habitTotals ?? emptyCounts(),
+        lifetimePoints: resolved?.lifetimePoints ?? 0,
+        habitTotals: resolved?.habitTotals ?? emptyCounts(),
       });
     }
 

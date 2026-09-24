@@ -2,10 +2,10 @@ rules_version = '2';
 
 // TableHabit security rules.
 //
-// Anyone signed in with one of the TableHabit accounts can read the table
-// (names, weekly logs, lifetime totals). Nobody can write anyone else's data,
-// and a submitted day is a permanent record: it can be created once but never
-// edited or deleted from the client.
+// Anyone signed in can read the table (names, weekly logs, lifetime totals).
+// Nobody can write anyone else's data. A submitted day stays editable until
+// the day finishes: the owner may overwrite their own log, but never delete
+// it, and the day id always stays `{uid}_{YYYY-MM-DD}`.
 //
 // Deploy with:  firebase deploy --only firestore:rules --project tablehabit
 
@@ -16,21 +16,43 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function validMemberKey(key) {
+      return key == null || key in ["mohammed", "abdullah", "ammar", "yousef", "omar"];
+    }
+
     // Lifetime totals + avatar identity, one document per account.
     match /users/{uid} {
       allow read: if signedIn();
-      allow create: if signedIn() && request.auth.uid == uid;
-      allow update: if signedIn() && request.auth.uid == uid
-        && request.resource.data.lifetimePoints is int
-        && request.resource.data.lifetimePoints >= resource.data.lifetimePoints;
+      allow create: if isOwner(uid)
+        && validMemberKey(request.resource.data.memberKey);
+      allow update: if isOwner(uid)
+        && request.resource.data.uid == uid
+        // The roster key may be filled in once for profiles created before
+        // the key-based join, then it is frozen.
+        && (resource.data.get("memberKey", null) == null
+            || request.resource.data.memberKey == resource.data.memberKey)
+        && validMemberKey(request.resource.data.memberKey)
+        && request.resource.data.lifetimePoints is int;
       allow delete: if false;
     }
 
-    // One immutable document per submitted day: {uid}_{YYYY-MM-DD}.
+    // One editable document per saved day: {uid}_{YYYY-MM-DD}.
     match /dailyLogs/{logId} {
       allow read: if signedIn();
-      allow create: if signedIn() && request.resource.data.uid == request.auth.uid;
-      allow update, delete: if false;
+      allow create: if signedIn()
+        && request.resource.data.uid == request.auth.uid
+        && validMemberKey(request.resource.data.memberKey);
+      allow update: if signedIn()
+        && resource.data.uid == request.auth.uid
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.date == resource.data.date
+        && request.resource.data.memberKey == resource.data.memberKey
+        && validMemberKey(request.resource.data.memberKey);
+      allow delete: if false;
     }
 
     // Today's in-progress checklist, one document per account.

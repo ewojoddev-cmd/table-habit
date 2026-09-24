@@ -19,6 +19,7 @@ import {
   HABITS,
   emptyCounts,
   identifyMember,
+  memberKeyForLogin,
   normalizeChecks,
   normalizeCounts,
   parseDateKey,
@@ -89,8 +90,8 @@ export function dayLogId(uid: string, date: string): string {
 export type DayLog = {
   id: string;
   uid: string;
+  memberKey: string | null;
   name: string;
-  email: string;
   date: string;
   checks: HabitChecks;
   points: number;
@@ -102,8 +103,11 @@ function mapDayLog(id: string, data: FirestoreData): DayLog {
   return {
     id,
     uid: String(data.uid ?? ""),
+    memberKey:
+      typeof data.memberKey === "string" && data.memberKey
+        ? data.memberKey
+        : null,
     name: String(data.name ?? ""),
-    email: String(data.email ?? ""),
     date: String(data.date ?? ""),
     checks: normalizeChecks(data.checks),
     points: Number(data.points ?? 0),
@@ -114,30 +118,34 @@ function mapDayLog(id: string, data: FirestoreData): DayLog {
 
 export type MemberStats = {
   uid: string;
+  memberKey: string | null;
   name: string;
-  email: string;
   color: string;
   lifetimePoints: number;
-  daysSubmitted: number;
   habitTotals: HabitCounts;
   lastSubmittedDate: string | null;
 };
 
 function mapMember(uid: string, data: FirestoreData): MemberStats {
-  const identity = identifyMember(
-    typeof data.email === "string" ? data.email : "",
-  );
+  const memberKey =
+    typeof data.memberKey === "string" && data.memberKey
+      ? data.memberKey
+      : null;
+  const identity = identifyMember({
+    memberKey,
+    name: typeof data.name === "string" ? data.name : null,
+    fallbackId: uid,
+  });
   return {
     uid,
+    memberKey,
     name:
       typeof data.name === "string" && data.name ? data.name : identity.name,
-    email: identity.email,
     color:
       typeof data.color === "string" && data.color
         ? data.color
         : identity.color,
     lifetimePoints: Number(data.lifetimePoints ?? 0),
-    daysSubmitted: Number(data.daysSubmitted ?? 0),
     habitTotals: normalizeCounts(data.habitTotals),
     lastSubmittedDate:
       typeof data.lastSubmittedDate === "string"
@@ -155,17 +163,34 @@ export async function ensureProfile(user: {
   const ref = doc(db, USERS, user.uid);
   const snapshot = await getDoc(ref);
   if (snapshot.exists()) {
-    return mapMember(user.uid, snapshot.data() as FirestoreData);
+    const data = snapshot.data() as FirestoreData;
+    const storedKey =
+      typeof data.memberKey === "string" && data.memberKey
+        ? data.memberKey
+        : null;
+    const derivedKey = memberKeyForLogin(user.email);
+    if (!storedKey && derivedKey) {
+      // One-time heal: profiles written before the key-based join get their
+      // roster key filled in on the owner's next sign-in (rules allow the key
+      // to be set once, never changed afterwards).
+      await setDoc(
+        ref,
+        { memberKey: derivedKey, updatedAt: serverTimestamp() },
+        { merge: true },
+      );
+      return mapMember(user.uid, { ...data, memberKey: derivedKey });
+    }
+    return mapMember(user.uid, data);
   }
 
-  const identity = identifyMember(user.email);
+  const memberKey = memberKeyForLogin(user.email);
+  const identity = identifyMember({ memberKey, fallbackId: user.uid });
   await setDoc(ref, {
     uid: user.uid,
-    email: identity.email,
+    memberKey,
     name: identity.name,
     color: identity.color,
     lifetimePoints: 0,
-    daysSubmitted: 0,
     habitTotals: emptyCounts(),
     lastSubmittedDate: null,
     createdAt: serverTimestamp(),
@@ -174,11 +199,10 @@ export async function ensureProfile(user: {
 
   return {
     uid: user.uid,
+    memberKey,
     name: identity.name,
-    email: identity.email,
     color: identity.color,
     lifetimePoints: 0,
-    daysSubmitted: 0,
     habitTotals: emptyCounts(),
     lastSubmittedDate: null,
   };
@@ -238,18 +262,20 @@ export async function clearDraft(uid: string): Promise<void> {
 export type SubmitOutcome = {
   /** Points recorded for the day. */
   points: number;
-  /** True when Firestore already had this day, so nothing was added. */
-  alreadySubmitted: boolean;
+  /** True when the day already existed, so the record was updated. */
+  updated: boolean;
 };
 
 /**
- * Record one day for one user. Runs in a transaction so a day can only ever be
- * counted once, and the same transaction adds the points to the lifetime
- * totals plus the per-habit breakdown on the profile document.
+ * Record (or update) one day for one user. Submitting is a live update until
+ * the day finishes: when the day already exists it is overwritten, and the
+ * lifetime totals plus the per-habit breakdown are adjusted by the
+ * *difference* between the new and previous checks. There is intentionally
+ * no counter of how many times a day was submitted.
  */
 export async function submitDay(input: {
   uid: string;
-  email: string;
+  memberKey: string | null;
   name: string;
   date: string;
   checks: HabitChecks;
@@ -257,18 +283,22 @@ export async function submitDay(input: {
   auto: boolean;
 }): Promise<SubmitOutcome> {
   const db = getFirebaseDb();
-  const identity = identifyMember(input.email);
+  const identity = identifyMember({
+    memberKey: input.memberKey,
+    name: input.name,
+    fallbackId: input.uid,
+  });
   const points = pointsFor(input.checks);
 
   return runTransaction(db, async (transaction) => {
     const logRef = doc(db, DAY_LOGS, dayLogId(input.uid, input.date));
     const logSnapshot = await transaction.get(logRef);
-    if (logSnapshot.exists()) {
-      return {
-        points: Number((logSnapshot.data() as FirestoreData).points ?? 0),
-        alreadySubmitted: true,
-      };
-    }
+    const previous = logSnapshot.exists()
+      ? (logSnapshot.data() as FirestoreData)
+      : null;
+    const previousChecks = previous ? normalizeChecks(previous.checks) : null;
+    const previousPoints = previous ? Number(previous.points ?? 0) : 0;
+    const updated = previous !== null;
 
     const profileRef = doc(db, USERS, input.uid);
     const profileSnapshot = await transaction.get(profileRef);
@@ -278,13 +308,21 @@ export async function submitDay(input: {
 
     const habitTotals = normalizeCounts(profile.habitTotals);
     for (const habit of HABITS) {
-      if (input.checks[habit.id]) habitTotals[habit.id] += 1;
+      if (previousChecks) {
+        if (input.checks[habit.id] && !previousChecks[habit.id]) {
+          habitTotals[habit.id] += 1;
+        } else if (!input.checks[habit.id] && previousChecks[habit.id]) {
+          habitTotals[habit.id] = Math.max(0, habitTotals[habit.id] - 1);
+        }
+      } else if (input.checks[habit.id]) {
+        habitTotals[habit.id] += 1;
+      }
     }
 
     transaction.set(logRef, {
       uid: input.uid,
+      memberKey: input.memberKey,
       name: input.name || identity.name,
-      email: identity.email,
       date: input.date,
       weekStart: weekStartKey(parseDateKey(input.date)),
       checks: input.checks,
@@ -297,7 +335,7 @@ export async function submitDay(input: {
       profileRef,
       {
         uid: input.uid,
-        email: identity.email,
+        memberKey: input.memberKey,
         name:
           (typeof profile.name === "string" && profile.name) ||
           input.name ||
@@ -305,8 +343,8 @@ export async function submitDay(input: {
         color:
           (typeof profile.color === "string" && profile.color) ||
           identity.color,
-        lifetimePoints: Number(profile.lifetimePoints ?? 0) + points,
-        daysSubmitted: Number(profile.daysSubmitted ?? 0) + 1,
+        lifetimePoints:
+          Number(profile.lifetimePoints ?? 0) + (points - previousPoints),
         habitTotals,
         lastSubmittedDate: input.date,
         createdAt: profileSnapshot.exists()
@@ -317,7 +355,7 @@ export async function submitDay(input: {
       { merge: true },
     );
 
-    return { points, alreadySubmitted: false };
+    return { points, updated };
   });
 }
 

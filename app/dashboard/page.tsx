@@ -16,16 +16,13 @@ export default function DashboardPage() {
 }
 
 function Dashboard() {
-  const { user, signOut } = useAuth();
+  const { signOut } = useAuth();
 
   return (
     <main className="min-h-screen bg-th-mist">
       <header className="flex items-center justify-between border-b border-th-haze px-6 py-4">
         <Logo size={28} />
         <div className="flex items-center gap-4">
-          <span className="hidden text-sm text-th-orient/80 sm:inline">
-            {user?.email}
-          </span>
           <button
             type="button"
             onClick={() => void signOut()}

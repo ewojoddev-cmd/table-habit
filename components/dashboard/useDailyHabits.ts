@@ -12,9 +12,10 @@ import {
   submitDay,
 } from "@/lib/firestore";
 import {
+  HABITS,
   emptyChecks,
   formatShortDate,
-  identifyMember,
+  memberKeyForLogin,
   msUntilNextLocalMidnight,
   pointsFor,
   todayKey,
@@ -22,7 +23,10 @@ import {
   type HabitId,
 } from "@/lib/habits";
 
-export type DailyStatus = "loading" | "ready" | "submitting" | "submitted";
+export type DailyStatus = "loading" | "ready" | "submitting" | "saved";
+
+/** Latest submitted points plus whether the day had previous saves. */
+export type DailySaved = { points: number; auto: boolean; updated: boolean };
 
 export type DailyHabits = {
   /** The local day on screen, `YYYY-MM-DD`. */
@@ -30,8 +34,10 @@ export type DailyHabits = {
   checks: HabitChecks;
   points: number;
   status: DailyStatus;
-  /** Set once today exists in Firestore, which locks the checklist. */
-  submitted: { points: number; auto: boolean } | null;
+  /** Latest saved record for today, if the day has been submitted. */
+  submitted: DailySaved | null;
+  /** True when the on-screen ticks differ from the last submitted record. */
+  dirty: boolean;
   /** Auto-submit / recovery note, e.g. an unfinished day was closed. */
   notice: string | null;
   error: string | null;
@@ -39,50 +45,58 @@ export type DailyHabits = {
   submit: () => void;
 };
 
-type Snapshot = {
-  uid: string | null;
-  email: string | null;
-  day: string;
-  checks: HabitChecks;
-  submitted: DailyHabits["submitted"];
-};
+/** A custom event other panels listen to so the table refreshes on save. */
+export const DAY_SAVED_EVENT = "tablehabit:day-saved";
+
+function checksEqual(a: HabitChecks, b: HabitChecks | null): boolean {
+  if (!b) return false;
+  return HABITS.every((habit) => a[habit.id] === b[habit.id]);
+}
 
 /**
- * Owns today's checklist: mirrors ticks to `drafts/{uid}`, records the day on
+ * Owns today's checklist: mirrors ticks to `drafts/{uid}`, saves the day on
  * submit, and closes the day automatically once the local clock passes
- * midnight (or when a stale draft is found on the next visit).
+ * midnight (or when a stale draft is found on the next visit). Saving is a
+ * live update — the day stays editable and every save overwrites the same
+ * record, so the table and leaderboards always show the latest numbers.
  */
 export function useDailyHabits(): DailyHabits {
   const { user } = useAuth();
   const uid = user?.uid ?? null;
-  const email = user?.email ?? null;
+  const userEmail = user?.email ?? null;
+  const memberKey = memberKeyForLogin(userEmail);
 
   const [day, setDay] = useState(() => todayKey());
   const [checks, setChecks] = useState<HabitChecks>(emptyChecks);
+  const [savedChecks, setSavedChecks] = useState<HabitChecks | null>(null);
   const [submitted, setSubmitted] = useState<DailyHabits["submitted"]>(null);
   const [status, setStatus] = useState<DailyStatus>("loading");
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  const savedChecksRef = useRef(savedChecks);
+  savedChecksRef.current = savedChecks;
 
   /** Latest values, readable from timers and async work. */
-  const latest = useRef<Snapshot>({ uid, email, day, checks, submitted });
-  latest.current = { uid, email, day, checks, submitted };
+  const latest = useRef({ uid, memberKey, userEmail, day, checks });
+  latest.current = { uid, memberKey, userEmail, day, checks };
 
   /** Write one day to Firestore and drop the draft. */
   const recordDay = useCallback(
     async (input: { date: string; checks: HabitChecks; auto: boolean }) => {
-      const { uid: currentUid, email: currentEmail } = latest.current;
-      if (!currentUid) return 0;
+      const current = latest.current;
+      if (!current.uid) return { points: 0, updated: false };
       const outcome = await submitDay({
-        uid: currentUid,
-        email: currentEmail ?? "",
-        name: identifyMember(currentEmail).name,
+        uid: current.uid,
+        memberKey: current.memberKey,
+        name: "",
         date: input.date,
         checks: input.checks,
         auto: input.auto,
       });
-      await clearDraft(currentUid);
-      return outcome.points;
+      await clearDraft(current.uid);
+      return outcome;
     },
     [],
   );
@@ -90,25 +104,34 @@ export function useDailyHabits(): DailyHabits {
   /** Load whatever Firestore already knows about `target`, then fill the gap. */
   const syncDay = useCallback(
     async (target: string) => {
-      const { uid: currentUid, email: currentEmail } = latest.current;
-      if (!currentUid) return;
+      const current = latest.current;
+      if (!current.uid) return;
       setStatus("loading");
       setError(null);
       try {
-        await ensureProfile({ uid: currentUid, email: currentEmail });
+        await ensureProfile({
+          uid: current.uid,
+          email: current.userEmail,
+        });
 
-        const recorded = await loadDayLog(currentUid, target);
+        const recorded = await loadDayLog(current.uid, target);
         if (recorded) {
           setChecks(recorded.checks);
-          setSubmitted({ points: recorded.points, auto: recorded.auto });
-          setStatus("submitted");
+          setSavedChecks(recorded.checks);
+          setSubmitted({
+            points: recorded.points,
+            auto: recorded.auto,
+            updated: true,
+          });
+          setStatus("saved");
           setNotice(null);
           return;
         }
 
-        const draft = await loadDraft(currentUid);
+        const draft = await loadDraft(current.uid);
         if (draft && draft.date === target) {
           setChecks(draft.checks);
+          setSavedChecks(null);
           setSubmitted(null);
           setStatus("ready");
           setNotice(null);
@@ -117,24 +140,26 @@ export function useDailyHabits(): DailyHabits {
 
         if (draft) {
           // The app closed before the day ended, so close that day now.
-          const points = await recordDay({
+          const outcome = await recordDay({
             date: draft.date,
             checks: draft.checks,
             auto: true,
           });
           setNotice(
-            `Your ${formatShortDate(draft.date)} checklist was submitted automatically: ${points} ${points === 1 ? "point" : "points"}.`,
+            `Your ${formatShortDate(draft.date)} checklist was saved automatically: ${outcome.points} ${outcome.points === 1 ? "point" : "points"}.`,
           );
         } else {
           setNotice(null);
         }
 
         setChecks(emptyChecks());
+        setSavedChecks(null);
         setSubmitted(null);
         setStatus("ready");
       } catch (cause) {
         setError(friendlyDbError(cause));
         setChecks(emptyChecks());
+        setSavedChecks(null);
         setSubmitted(null);
         setStatus("ready");
       }
@@ -159,15 +184,26 @@ export function useDailyHabits(): DailyHabits {
 
     const closeDay = async () => {
       const snapshot = latest.current;
-      if (snapshot.submitted) return;
+      if (!snapshot.uid) return;
       try {
-        if (Object.values(snapshot.checks).some(Boolean)) {
-          await recordDay({
+        // If anything is ticked, close the day even when it was already
+        // saved — the explicit save below simply overwrites that record.
+        // Fully unticked days keep their last saved record if they have
+        // one (an explicit "nothing today" update); days never saved at
+        // all leave no record behind.
+        const prior = await loadDayLog(snapshot.uid, snapshot.day);
+        if (Object.values(snapshot.checks).some(Boolean) || prior) {
+          await submitDay({
+            uid: snapshot.uid,
+            memberKey: snapshot.memberKey,
+            name: "",
             date: snapshot.day,
             checks: snapshot.checks,
             auto: true,
           });
-        } else if (snapshot.uid) {
+          await clearDraft(snapshot.uid);
+          window.dispatchEvent(new CustomEvent(DAY_SAVED_EVENT));
+        } else {
           // Nothing was ticked, so there is no day worth recording.
           await clearDraft(snapshot.uid);
         }
@@ -209,9 +245,11 @@ export function useDailyHabits(): DailyHabits {
     };
   }, [uid, recordDay, syncDay]);
 
+  const dirty = !checksEqual(checks, savedChecks);
+
   const toggle = useCallback((id: HabitId) => {
     const snapshot = latest.current;
-    if (snapshot.submitted || !snapshot.uid) return;
+    if (!snapshot.uid || statusRef.current === "loading") return;
     const next: HabitChecks = { ...snapshot.checks, [id]: !snapshot.checks[id] };
     setChecks(next);
     setNotice(null);
@@ -224,21 +262,27 @@ export function useDailyHabits(): DailyHabits {
   const submit = useCallback(() => {
     void (async () => {
       const snapshot = latest.current;
-      if (!snapshot.uid || snapshot.submitted) return;
+      if (!snapshot.uid || statusRef.current === "submitting") return;
       setStatus("submitting");
       setError(null);
       try {
-        const earned = await recordDay({
+        const outcome = await recordDay({
           date: snapshot.day,
-          checks: snapshot.checks,
+          checks: { ...snapshot.checks },
           auto: false,
         });
-        setSubmitted({ points: earned, auto: false });
-        setStatus("submitted");
+        setSavedChecks({ ...snapshot.checks });
+        setSubmitted({
+          points: outcome.points,
+          auto: false,
+          updated: outcome.updated,
+        });
+        setStatus("saved");
         setNotice(null);
+        window.dispatchEvent(new CustomEvent(DAY_SAVED_EVENT));
       } catch (cause) {
         setError(friendlyDbError(cause));
-        setStatus("ready");
+        setStatus(savedChecksRef.current ? "saved" : "ready");
       }
     })();
   }, [recordDay]);
@@ -249,6 +293,7 @@ export function useDailyHabits(): DailyHabits {
     points: pointsFor(checks),
     status,
     submitted,
+    dirty,
     notice,
     error,
     toggle,
